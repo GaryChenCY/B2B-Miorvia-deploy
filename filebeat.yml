@@ -1,0 +1,118 @@
+filebeat.inputs:
+  - type: filestream
+    id: selected-docker-containers
+    enabled: true
+    # 讀取宿主機上所有 Docker 容器的 log
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    parsers:
+      - container:
+          stream: all
+          format: docker
+
+# 每筆 event 的 processors
+processors:
+  # 必須先加 metadata，後面才能依 container.name 過濾
+  - add_docker_metadata:
+      host: unix:///var/run/docker.sock
+  # 只收有業務價值的 App 與 Nginx；避免把 ES/Filebeat 自己的 log 再送回 ES 形成噪音。
+  # container.name 必須和 docker-compose.yml 的 container_name 完全一致。
+  - drop_event:
+      when:
+        not:
+          or:
+            - equals:
+                container.name: b2b-e-commerce-app
+            - equals:
+                container.name: b2b-nginx
+  # App 與 Nginx 都輸出 JSON
+  - decode_json_fields:
+      fields: ["message"] # Docker log 的實際內容會在 "message"
+      target: "" # 解到最外層，不要再包一層
+      overwrite_keys: false
+      add_error_key: true
+      max_depth: 2
+
+  - add_fields:
+      when:
+        equals:
+          container.name: b2b-e-commerce-app
+      target: service
+      fields:
+        name: b2b-api
+  
+  - add_fields:
+      when:
+        equals:
+          container.name: b2b-nginx
+      target: service
+      fields:
+        name: nginx
+
+  - add_fields:
+      target: deployment
+      fields:
+        environment: "${APP_ENV:prod}"
+  
+# Elasticsearch Output
+output.elasticsearch:
+  # 從環境變數讀 ES host（compose 有設定 ELASTICSEARCH_HOSTS）
+  hosts:
+    - "${ELASTICSEARCH_HOSTS:http://elasticsearch:9200}"
+  # 安全開啟時，使用 basic auth
+  username: "${ELASTICSEARCH_USERNAME}"
+  password: "${ELASTICSEARCH_PASSWORD}"
+
+  # 使用環境變數，不使用 event field 動態產生 alias
+  index: "b2b-logs-${APP_ENV:prod}"
+
+  backoff.init: 1s
+  backoff.max: 60s
+# Policy、template、alias 由 setup-elk.sh 管理；Filebeat writer 因此不需要建立 template 的高權限。
+setup.ilm.enabled: false
+setup.template.enabled: false
+
+# Kibana 設定（用於 setup）
+# setup.kibana:
+#   host: "http://kibana:5601"
+#   username: "elastic"                                  # 第一次可以用 elastic
+#   password: "${ELASTIC_PASSWORD}"                      # 同 ES 的 elastic 密碼
+  
+# Filebeat 自己的 Log 設定
+logging:
+  level: info
+  to_files: false
+  to_stdout: true
+  # 若日後想把 Filebeat 自己的 log 存檔：
+  # to_files: true
+  # files:
+  #   path: /var/log/filebeat
+  #   name: filebeat
+  #   keepfiles: 7
+  #   rotateeverybytes: 10485760 # 10MB
+
+# 提供 / 與 /stats 給 Docker healthcheck、deploy/check-observability.sh 或外部監控查詢。
+# 只在 Compose 綁定到 127.0.0.1，不直接暴露公網。
+http.enabled: true
+http.host: 0.0.0.0
+http.port: 5066
+
+# 若日後要啟用 Kibana Stack Monitoring，請另外建立 monitoring user；不要沿用 elastic superuser。
+# monitoring:
+#   enabled: true
+#   elasticsearch:
+#     hosts: ["${ELASTICSEARCH_HOSTS:http://elasticsearch:9200}"]
+#     username: "${FILEBEAT_MONITORING_USERNAME}"
+#     password: "${FILEBEAT_MONITORING_PASSWORD}"
+
+queue.disk:
+  # 放在 persistent path.data 裡。
+  path: "${path.data}/diskqueue"
+
+  # 依實際 log 量調整。
+  # 例如平均每小時 100MB，4GB 約可緩衝 40 小時。
+  max_size: 4GB
+
+  segment_size: 100MB
+  read_ahead: 512
+  write_ahead: 2048

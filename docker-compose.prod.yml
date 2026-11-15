@@ -1,0 +1,7 @@
+services:
+  app:
+    # APP_IMAGE 與 APP_DIGEST 都由部署流程提供；digest 不會像 tag 一樣被覆寫，退版較可靠
+    # !reset 是 Compose override tag，用來移除 base file 的本機 build 設定
+    build: !reset null
+    image: ${APP_IMAGE:?APP_IMAGE is required}@${APP_DIGEST:?APP_DIGEST is required}
+    pull_policy: always
