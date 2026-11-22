@@ -1,91 +1,37 @@
 services:
   app:
-    # 本機預設由原始碼 build；正式環境請再疊加 docker-compose.prod.yml，改用 CI 發佈的 immutable digest
-    build:
-      context: .
-      target: runtime
-    image: b2b-e-commerce-api:local
-    pull_policy: build
-    container_name: b2b-e-commerce-app
-    labels:
-      observability.logs: "true"
-      observability.service: "b2b-api"
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      - APP_PORT=9000
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_MAX_OPEN_CONNS=10
+      - DB_MAX_IDLE_CONNS=5
+    cpus: "0.50"
     logging:
       driver: json-file
       options:
-        max-size: "50m"
-        max-file: "5"
+        max-size: "10m"
+        max-file: "3"
     env_file:
       - .env
-    environment:
-      - TZ=UTC
-      - APP_ENV=${APP_ENV}
-      - APP_PORT=${APP_PORT}
-      - LOG_LEVEL=${LOG_LEVEL}
-      # request/response body 只記錄可安全解析的文字格式，並受大小上限與敏感欄位遮罩保護
-      - HTTP_LOG_BODIES=${HTTP_LOG_BODIES:-false}
-      - HTTP_LOG_BODY_MAX_BYTES=${HTTP_LOG_BODY_MAX_BYTES:-32768}
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASS=${DB_PASS}
-      - DB_HOST=db
-      - DB_PORT=${DB_PORT}
-      - DB_SSLMODE=${DB_SSLMODE}
-      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
-      - JWT_EXPIRES_IN=${JWT_EXPIRES_IN}
-      - REFRESH_SECRET=${REFRESH_SECRET:?REFRESH_SECRET is required}
-      - REFRESH_EXPIRES_IN=${REFRESH_EXPIRES_IN}
     depends_on:
       db:
-        condition: service_healthy # 等 DB 健康再啟 app
+        condition: service_healthy
     networks:
       - backend_net
-    restart: unless-stopped # 掛掉自動重啟，除非手動 stop
-    # === 資源上限（避免 Go 服務異常）===
-    mem_limit: 768m # 硬上限：最多用到 768MB
-    mem_reservation: 256m # 軟保留：希望至少保留 256MB
-    pids_limit: 200 # 防止異常 fork 大量程序
-
-    # logging 用 Docker 預設 json-file，Filebeat 會去抓 /var/lib/docker/containers/*/*.log
-  
-  # --- Nginx Reverse Proxy ---
-  nginx:
-    image: nginx:stable-alpine # 穩定分支 + Alpine
-    container_name: b2b-nginx
-    labels:
-      observability.logs: "true"
-      observability.service: "nginx"
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "5"
-    depends_on:
-      - app
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-      - ./releases:/var/www/releases:ro
-      - /opt/B2B_E_Commerce/certs/cloudflare-origin.crt:/etc/nginx/certs/cloudflare-origin.crt:ro
-      - /opt/B2B_E_Commerce/certs/cloudflare-origin.key:/etc/nginx/certs/cloudflare-origin.key:ro
-      - /opt/B2B_E_Commerce/nginx-auth/.htpasswd:/etc/nginx/.htpasswd:ro
-    networks:
-      - frontend_net
-      - backend_net
-      - elk
     restart: unless-stopped
-    mem_limit: 128m
-    mem_reservation: 64m
-    pids_limit: 100
+    mem_limit: 512m
+    mem_reservation: 256m
+    pids_limit: 200  
 
-  # --- Postgres Database ---
+  # --- Postgres ---
   db:
     image: postgres:16-alpine
     container_name: b2b-postgres
     ports:
-      - "127.0.0.1:54321:54321"
+      - "127.0.0.1:54321:5432"
     environment:
       - TZ=UTC
       - PGTZ=UTC
@@ -103,42 +49,47 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    # === Postgres 資源上限（同機 ELK 時，PG 至少要有穩定空間）===
-    mem_limit: 1500m
-    mem_reservation: 1g
-    shm_size: 256m
-    pids_limit: 300
+    cpus: "0.75"
+    mem_limit: 1g
+    mem_reservation: 512m
+    shm_size: 128m
+    pids_limit: 200
     command:
       - "postgres"
       - "-c"
       - "shared_buffers=256MB"
       - "-c"
-      - "work_mem=8MB"
+      - "work_mem=4MB"
       - "-c"
-      - "maintenance_work_mem=128MB"
+      - "maintenance_work_mem=64MB"
       - "-c"
-      - "effective_cache_size=768MB"
+      - "effective_cache_size=512MB"
       - "-c"
       - "timezone=UTC"
+      - "-c"
+      - "max_connections=30"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
-  # --- Elasticsearch & Kibana for logging ---
+  # --- Elasticsearch ---
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.18.8
     container_name: b2b-es
     environment:
-      - discovery.type=single-node # 單節點模式（Lab/小型 Prod）
-      # ES Heap 設定：這是 JVM heap，不是容器總記憶體
+      - discovery.type=single-node
       - ES_JAVA_OPTS=-Xms1g -Xmx1g
-      # 避免 swap 造成延遲（配合 host 設定/ulimit)
       - bootstrap.memory_lock=true
       - xpack.security.enabled=true
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # elastic 使用者的密碼
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
     volumes:
       - es_data:/usr/share/elasticsearch/data
     ports:
       - "127.0.0.1:9200:9200"
     networks:
-      - elk # 與 Kibana / Filebeat 同一個 network!!!
+      - elk
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --user elastic:$${ELASTIC_PASSWORD} http://localhost:9200/_cluster/health >/dev/null"]
@@ -146,7 +97,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 40s
-    # === ES 容器總記憶體上限（heap 2g + off-heap/pagecache 仍會吃）===
     mem_limit: 2500m
     mem_reservation: 2000m
     ulimits:
@@ -156,8 +106,9 @@ services:
       nofile:
         soft: 65535
         hard: 65535
+    profiles: ["observability"]
 
-  #  --- Kibana（Log Dashboard）---
+  #  --- Kibana---
   kibana:
     image: docker.elastic.co/kibana/kibana:8.18.8
     container_name: b2b-kibana
@@ -175,20 +126,17 @@ services:
     mem_limit: 768m
     mem_reservation: 512m
     pids_limit: 200
+    profiles: ["observability"]
 
-  # Filebeat（Log Shipper）
+  # --- Filebeat ---
   filebeat:
     image: docker.elastic.co/beats/filebeat:8.18.8
     container_name: b2b-filebeat
     user: root
     volumes:
-      # 宿主機的 docker 容器 log 路徑
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
-      # docker.sock 用於取得 container metadata
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Filebeat 設定檔
       - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
-      # 保存 registry 與 disk queue
       - filebeat_data:/usr/share/filebeat/data
     depends_on:
       elasticsearch:
@@ -200,11 +148,10 @@ services:
       ELASTICSEARCH_PASSWORD: ${FILEBEAT_PASSWORD}
     networks:
       - elk
-    # 僅綁定 localhost，提供健康檢查與外部監控讀取 queue 狀態，不對公網開放
     ports:
       - "127.0.0.1:5066:5066"
     restart: unless-stopped
-    command: ["filebeat", "-e"] # -e: 把 filebeat 自己的 log 打到 stdout
+    command: ["filebeat", "-e"]
     healthcheck:
       test: ["CMD-SHELL", "filebeat test config -c /usr/share/filebeat/filebeat.yml"]
       interval: 30s
@@ -219,6 +166,7 @@ services:
     mem_limit: 256m
     mem_reservation: 128m
     pids_limit: 150
+    profiles: ["observability"]
 
 volumes:
   pg_data:
@@ -228,7 +176,7 @@ volumes:
 networks:
   frontend_net:
   backend_net:
-    name: b2b_backend_net # 固定名稱加上專案前綴，避免同一台主機的其他 Compose 專案撞名
+    name: b2b_backend_net
   elk:
     name: b2b_elk_net
   
