@@ -1,7 +1,5 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-# ===== 可調整參數 =====
 ES_URL="${ES_URL:-http://localhost:9200}"
 ES_USER="${ES_USER:-elastic}"
 ES_PASS="${ES_PASS:-${ELASTIC_PASSWORD:-}}"
@@ -13,7 +11,6 @@ ALIAS="b2b-logs-${ENV_NAME}"
 POLICY="b2b-logs-policy"
 TEMPLATE="b2b-logs-${ENV_NAME}-template"
 
-# 以 script 自己的位置找 policy，確保從任意工作目錄執行都不會找錯檔案。
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if [[ ! "${ENV_NAME}" =~ ^[a-z0-9_-]+$ ]]; then
@@ -38,7 +35,6 @@ if [[ -z "${ES_PASS}" ]]; then
   exit 1
 fi
 
-# 暫存 JSON 可能包含 writer password，先限制權限，再於離開時刪除。
 umask 077
 TASK_TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "${TASK_TMP_DIR}"' EXIT

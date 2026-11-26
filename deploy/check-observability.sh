@@ -1,8 +1,5 @@
-#!/usr/bin/env bash
 set -euo pipefail
 
-# 給 cron、Uptime Kuma、Nagios 類工具使用：0=正常、1=警告、2=嚴重。
-# Kibana/ES 整組故障時，Kibana 自己無法發告警，所以此檢查應由 ELK 之外的監控定期執行。
 FILEBEAT_URL="${FILEBEAT_URL:-http://127.0.0.1:5066}"
 ES_URL="${ES_URL:-http://127.0.0.1:9200}"
 ES_USER="${ES_USER:-elastic}"
@@ -67,7 +64,6 @@ if [[ "${cluster_status}" == "red" || "${cluster_status}" == "unknown" ]]; then
   severity=2
   messages+=("Elasticsearch cluster ${cluster_status}")
 elif [[ "${cluster_status}" == "yellow" ]]; then
-  # 單節點且 replica=0 時通常應為 green；yellow 仍值得檢查 allocation。
   (( severity < 1 )) && severity=1
   messages+=("Elasticsearch cluster ${cluster_status}")
 fi
